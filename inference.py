@@ -56,10 +56,13 @@ except ImportError:  # pragma: no cover - supports direct `python inference.py`
 
 # ---------------------------------------------------------------------------
 # Configuration — read from environment variables
+# Required: HF_TOKEN (mandatory, no default per spec)
+# Optional: API_BASE_URL, MODEL_NAME (must have defaults per spec)
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+
 RETURN_DESK_BASE_URL = os.getenv("RETURN_DESK_BASE_URL") or "http://localhost:8000"
 MAX_STEPS = int(os.getenv("RETURN_DESK_MAX_STEPS", "20"))  # hard_partial_resolution needs 14 steps min
 USE_LLM = os.getenv("RETURN_DESK_USE_LLM", "true").lower() in {"1", "true", "yes"}
