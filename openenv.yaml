@@ -1,7 +1,11 @@
 spec_version: 1
 name: return_desk_env
-version: "0.1.0"
-description: "Deterministic e-commerce returns and refunds environment for OpenEnv"
+version: "0.3.0"
+description: >
+  E-commerce returns and fraud-detection operations environment with 7 procedurally-generated
+  tasks across 4 difficulty tiers (easy / medium / hard / extreme), 9-component weighted grader,
+  semantic reply scoring, multi-objective cost-efficiency rewards, fraud detection with -0.40
+  penalty, forced evidence-based reasoning, and per-step shaped rewards.
 type: space
 runtime: fastapi
 app: server.app:app

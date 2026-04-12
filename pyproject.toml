@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openenv-return-desk-env"
-version = "0.1.0"
-description = "ReturnDesk OpenEnv environment for e-commerce returns and refunds"
+version = "0.3.0"
+description = "ReturnDesk OpenEnv — e-commerce returns, fraud detection, and chargeback operations environment (7 tasks, 4 difficulty tiers)"
 requires-python = ">=3.10"
 dependencies = [
   "openenv-core[core]>=0.2.2",
@@ -32,3 +32,8 @@ package-dir = { "return_desk_env" = ".", "return_desk_env.server" = "server", "r
 
 [tool.setuptools.package-data]
 return_desk_env = ["*.yaml", "*.yml", "README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short -q"
+anyio_mode = "asyncio"

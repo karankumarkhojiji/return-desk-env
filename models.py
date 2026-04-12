@@ -22,6 +22,8 @@ ACTION_TYPES = [
     "inspect_customer",
     "inspect_policy",
     "inspect_inventory",
+    "flag_fraud",
+    "ask_customer",
     "set_priority",
     "add_tag",
     "set_item_resolution",
@@ -39,6 +41,8 @@ class ReturnDeskAction(Action):
         "inspect_customer",
         "inspect_policy",
         "inspect_inventory",
+        "flag_fraud",
+        "ask_customer",
         "set_priority",
         "add_tag",
         "set_item_resolution",
@@ -47,6 +51,7 @@ class ReturnDeskAction(Action):
         "submit",
     ]
     item_id: Optional[str] = Field(default=None, description="Target item id for item-level actions")
+    question: Optional[str] = Field(default=None, description="Question text for ask_customer action")
     priority: Optional[Literal["low", "medium", "high", "urgent"]] = Field(
         default=None,
         description="Ticket priority for set_priority",
@@ -88,7 +93,7 @@ class ReturnDeskObservation(Observation):
     """Observation returned to agents after reset/step."""
 
     task_id: str
-    difficulty: Literal["easy", "medium", "hard"]
+    difficulty: Literal["easy", "medium", "hard", "extreme"]
     objective: str
     customer_ticket: Dict[str, Any]
     available_actions: List[str]
@@ -105,9 +110,19 @@ class ReturnDeskObservation(Observation):
     item_resolutions: Dict[str, str] = Field(default_factory=dict)
     ticket_resolution: Optional[str] = None
     drafted_reply: str = ""
+    customer_messages: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Multi-turn dialogue: customer follow-up messages in response to ask_customer or request_info actions",
+    )
     history: List[str] = Field(default_factory=list)
     steps_remaining: int = 0
     latest_note: str = ""
+    # Live reward breakdown — shown at every step so the agent can course-correct
+    reward_breakdown: Dict[str, float] = Field(default_factory=dict)
+    # Customer sentiment: 0.0 = neutral, negative = upset, positive = satisfied
+    customer_sentiment: Optional[float] = None
+    # Fraud flag raised by agent using flag_fraud action
+    fraud_flagged: bool = False
     final_score: Optional[float] = None
     grader_breakdown: Dict[str, float] = Field(default_factory=dict)
 
@@ -124,6 +139,7 @@ class ReturnDeskState(State):
     item_resolutions: Dict[str, str] = Field(default_factory=dict)
     ticket_resolution: Optional[str] = None
     steps_remaining: int = 0
+    fraud_flagged: bool = False
 
 
 ACTION_HELP = [
@@ -131,6 +147,8 @@ ACTION_HELP = [
     "{\"action_type\": \"inspect_customer\"}",
     "{\"action_type\": \"inspect_policy\"}",
     "{\"action_type\": \"inspect_inventory\"}",
+    "{\"action_type\": \"flag_fraud\"}",
+    "{\"action_type\": \"ask_customer\", \"question\": \"Can you provide more details about the issue?\"}",
     "{\"action_type\": \"set_priority\", \"priority\": \"high\"}",
     "{\"action_type\": \"add_tag\", \"tag\": \"damaged\"}",
     "{\"action_type\": \"set_item_resolution\", \"item_id\": \"item-1\", \"resolution\": \"refund\"}",

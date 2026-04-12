@@ -1,0 +1,30 @@
+# ReturnDeskEnv — Python Dependencies
+# Install with: pip install -r requirements.txt
+# Or use uv:    uv sync
+
+# Core web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.24.0
+
+# OpenEnv framework (environment SDK)
+openenv-core[core]>=0.2.2
+
+# Data validation
+pydantic>=2.0.0
+
+# LLM inference (OpenAI-compatible client)
+openai>=1.0.0
+
+# HTTP requests (client.py)
+requests>=2.31.0
+
+# Environment variable loading
+python-dotenv>=1.0.0
+
+# Optional: learning curve plots in trainer.py
+# Install separately if needed: pip install matplotlib
+# matplotlib>=3.8.0
+
+# Development / testing (not required for runtime)
+# pytest>=8.0.0
+# pytest-cov>=4.0.0

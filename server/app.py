@@ -10,10 +10,10 @@ from openenv.core.env_server.http_server import create_app
 
 try:
     from ..models import ReturnDeskAction, ReturnDeskObservation
-    from .environment import ReturnDeskEnvironment
+    from .environment import ReturnDeskEnvironment, CurriculumState, get_episode_replay, list_episode_ids
 except ImportError:  # pragma: no cover - supports running from repo root
     from models import ReturnDeskAction, ReturnDeskObservation
-    from server.environment import ReturnDeskEnvironment
+    from server.environment import ReturnDeskEnvironment, CurriculumState, get_episode_replay, list_episode_ids
 
 
 app = create_app(
@@ -28,6 +28,7 @@ app = create_app(
 # ---------------------------------------------------------------------------
 _env_lock = threading.Lock()
 _stateful_env: Optional[ReturnDeskEnvironment] = None
+_curriculum_state = CurriculumState(window=10)
 
 
 class DemoResetRequest(BaseModel):
@@ -71,7 +72,7 @@ def api_reset(request: DemoResetRequest) -> Dict[str, Any]:
             kwargs["task_id"] = request.task_id
         elif request.difficulty:
             kwargs["difficulty"] = request.difficulty
-        obs = _stateful_env.reset(**kwargs)
+        obs = _stateful_env.reset(**kwargs, curriculum_state=_curriculum_state)
     return _build_response(obs, reward=None, done=False)
 
 
@@ -82,15 +83,16 @@ def api_reset(request: DemoResetRequest) -> Dict[str, Any]:
         "Executes one action in the running episode.\n\n"
         "You MUST call /api/reset first.\n\n"
         "**action_type options:** `inspect_order`, `inspect_customer`, `inspect_policy`, "
-        "`inspect_inventory`, `set_priority`, `add_tag`, `set_item_resolution`, "
+        "`inspect_inventory`, `flag_fraud`, `set_priority`, `add_tag`, `set_item_resolution`, "
         "`set_ticket_resolution`, `draft_reply`, `submit`\n\n"
         "**Example bodies:**\n"
         "```json\n"
         '{\"action\": {\"action_type\": \"inspect_order\"}}\n'
+        '{\"action\": {\"action_type\": \"flag_fraud\"}}\n'
         '{\"action\": {\"action_type\": \"set_priority\", \"priority\": \"high\"}}\n'
-        '{\"action\": {\"action_type\": \"add_tag\", \"tag\": \"damaged\"}}\n'
+        '{\"action\": {\"action_type\": \"add_tag\", \"tag\": \"fraud_flag\"}}\n'
         '{\"action\": {\"action_type\": \"set_item_resolution\", \"item_id\": \"item-1\", \"resolution\": \"refund\"}}\n'
-        '{\"action\": {\"action_type\": \"set_ticket_resolution\", \"resolution\": \"refund\"}}\n'
+        '{\"action\": {\"action_type\": \"set_ticket_resolution\", \"resolution\": \"escalate\"}}\n'
         '{\"action\": {\"action_type\": \"draft_reply\", \"message\": \"We are sorry...\"}}\n'
         '{\"action\": {\"action_type\": \"submit\"}}\n'
         "```"
@@ -113,7 +115,82 @@ def api_step(request: DemoStepRequest) -> Dict[str, Any]:
         obs = _stateful_env.step(action)
         reward = obs.reward
         done = obs.done
+        # Record completed episode score into curriculum state
+        if done and obs.final_score is not None:
+            _curriculum_state.record(obs.final_score)
     return _build_response(obs, reward=reward, done=done)
+
+
+@app.get(
+    "/api/hint",
+    summary="[Stateful] Get the optimal next action for the current state",
+    description=(
+        "Returns the next action the deterministic policy would take given the current "
+        "episode state. Use this to power the auto-play UI without hardcoded solutions."
+    ),
+    tags=["Stateful Demo API"],
+)
+def api_hint() -> Dict[str, Any]:
+    global _stateful_env
+    with _env_lock:
+        if _stateful_env is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No active episode. Call POST /api/reset first.",
+            )
+        obs = _stateful_env._build_observation(reward=None)  # type: ignore[attr-defined]
+
+    try:
+        try:
+            from inference import _deterministic_policy  # type: ignore
+        except ImportError:
+            from return_desk_env.inference import _deterministic_policy  # type: ignore
+        next_action = _deterministic_policy(obs)
+    except Exception:
+        next_action = {"action_type": "submit"}
+
+    return {"next_action": next_action}
+
+
+@app.get(
+    "/api/replay/{episode_id}",
+    summary="Get full trajectory replay for a completed episode",
+    description=(
+        "Returns the complete step-by-step trajectory of a finished episode, "
+        "including every action taken, reward received, agent note, and sentiment value. "
+        "Useful for post-hoc analysis and debugging agent behaviour."
+    ),
+    tags=["Stateful Demo API"],
+)
+def api_replay(episode_id: str) -> Dict[str, Any]:
+    replay = get_episode_replay(episode_id)
+    if replay is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No replay found for episode_id='{episode_id}'. Episodes are stored only for the current server session.",
+        )
+    return replay
+
+
+@app.get(
+    "/api/replay",
+    summary="List all stored episode IDs",
+    description="Returns IDs of all episodes stored in the replay buffer (max 100, most recent last).",
+    tags=["Stateful Demo API"],
+)
+def api_replay_list() -> Dict[str, Any]:
+    ids = list_episode_ids()
+    return {"episode_ids": ids, "count": len(ids)}
+
+
+@app.get(
+    "/api/curriculum",
+    summary="Get curriculum training state",
+    description="Returns the current curriculum state: episode count, rolling mean score, and current difficulty level.",
+    tags=["Stateful Demo API"],
+)
+def api_curriculum() -> Dict[str, Any]:
+    return _curriculum_state.summary()
 
 
 # ---------------------------------------------------------------------------
@@ -235,8 +312,12 @@ def web_ui() -> str:
       <label>Choose Task</label>
       <select id="taskSelect">
         <option value="easy_refund">🟢 easy_refund — Damaged item refund</option>
-        <option value="medium_exchange">🟡 medium_exchange — Size exchange</option>
+        <option value="medium_exchange">🟡 medium_exchange — Size exchange / store credit</option>
+        <option value="expired_return">🟡 expired_return — Out-of-window denial</option>
+        <option value="wrong_item_sent">🟡 wrong_item_sent — Wrong product delivered</option>
         <option value="hard_partial_resolution">🔴 hard_partial_resolution — Multi-item mixed</option>
+        <option value="fraud_risk">🔴 fraud_risk — Fraud detection escalation</option>
+        <option value="extreme_chargeback">⚫ extreme_chargeback — Corporate chargeback (5 items)</option>
       </select>
       <br/><br/>
       <button class="btn btn-primary" onclick="doReset()">⚡ Reset / Start New Episode</button>
@@ -253,6 +334,8 @@ def web_ui() -> str:
             <option value="inspect_customer">inspect_customer</option>
             <option value="inspect_policy">inspect_policy</option>
             <option value="inspect_inventory">inspect_inventory</option>
+            <option value="flag_fraud">flag_fraud</option>
+            <option value="ask_customer">ask_customer</option>
             <option value="set_priority">set_priority</option>
             <option value="add_tag">add_tag</option>
             <option value="set_item_resolution">set_item_resolution</option>
@@ -283,6 +366,12 @@ def web_ui() -> str:
             <option value="vip_exception">vip_exception</option>
             <option value="partial_resolution">partial_resolution</option>
             <option value="non_returnable">non_returnable</option>
+            <option value="fraud_flag">fraud_flag</option>
+            <option value="policy_violation">policy_violation</option>
+            <option value="return_window_exceeded">return_window_exceeded</option>
+            <option value="wrong_item">wrong_item</option>
+            <option value="duplicate_charge">duplicate_charge</option>
+            <option value="escalation_required">escalation_required</option>
           </select>
         </div>
 
@@ -306,6 +395,11 @@ def web_ui() -> str:
             <option value="request_info">request_info</option>
             <option value="partial_refund">partial_refund</option>
           </select>
+        </div>
+
+        <div id="questionField" style="display:none">
+          <label>Your Question (optional)</label>
+          <input type="text" id="questionVal" placeholder="e.g. Can you provide proof of the damage?"/>
         </div>
 
         <div id="messageField" style="display:none">
@@ -339,6 +433,12 @@ def web_ui() -> str:
       <div style="display:flex;flex-direction:column;gap:8px;font-size:12px;">
         <div><span style="color:var(--muted)">Priority: </span><span id="stPriority" style="font-family:'JetBrains Mono',monospace">—</span></div>
         <div><span style="color:var(--muted)">Ticket Resolution: </span><span id="stTicketRes" style="font-family:'JetBrains Mono',monospace">—</span></div>
+        <div><span style="color:var(--muted)">Sentiment: </span><span id="stSentiment" style="font-family:'JetBrains Mono',monospace">—</span></div>
+        <div id="stFraudSec" style="display:none"><span style="color:var(--red);font-weight:600">⚠ Fraud flagged</span></div>
+        <div id="stDialogueSec" style="display:none">
+          <span style="color:var(--muted)">Customer Messages:</span>
+          <div id="stDialogue" style="margin-top:6px;display:flex;flex-direction:column;gap:6px"></div>
+        </div>
         <div><span style="color:var(--muted)">Tags: </span><div class="tags-display" id="stTags" style="margin-top:4px"></div></div>
         <div><span style="color:var(--muted)">Item Resolutions: </span><div class="tags-display" id="stItemRes" style="margin-top:4px"></div></div>
         <div id="stReplySec" style="display:none"><span style="color:var(--muted)">Reply drafted: </span><span style="color:var(--green)">✓</span></div>
@@ -384,48 +484,7 @@ let episodeActive = false;
 let taskId = 'easy_refund';
 let autoPlaying = false;
 
-const perfectSolutions = {
-  easy_refund: [
-    {action_type:'inspect_order'},
-    {action_type:'inspect_policy'},
-    {action_type:'set_priority', priority:'high'},
-    {action_type:'add_tag', tag:'damaged'},
-    {action_type:'add_tag', tag:'refund_request'},
-    {action_type:'set_item_resolution', item_id:'item-1', resolution:'refund'},
-    {action_type:'set_ticket_resolution', resolution:'refund'},
-    {action_type:'draft_reply', message:'We are sorry your BrewMaster Coffee Grinder arrived damaged. We will process a refund, and you should see it in 3-5 business days. No return required for the damaged unit.'},
-    {action_type:'submit'},
-  ],
-  medium_exchange: [
-    {action_type:'inspect_order'},
-    {action_type:'inspect_policy'},
-    {action_type:'inspect_inventory'},
-    {action_type:'set_priority', priority:'medium'},
-    {action_type:'add_tag', tag:'exchange_request'},
-    {action_type:'add_tag', tag:'inventory_issue'},
-    {action_type:'add_tag', tag:'coupon_order'},
-    {action_type:'set_item_resolution', item_id:'item-1', resolution:'store_credit'},
-    {action_type:'set_ticket_resolution', resolution:'store_credit'},
-    {action_type:'draft_reply', message:'We are sorry the exact blue size L hoodie is unavailable. We can issue store credit for the amount paid, $51.00, since the order used a coupon.'},
-    {action_type:'submit'},
-  ],
-  hard_partial_resolution: [
-    {action_type:'inspect_order'},
-    {action_type:'inspect_customer'},
-    {action_type:'inspect_policy'},
-    {action_type:'set_priority', priority:'high'},
-    {action_type:'add_tag', tag:'damaged'},
-    {action_type:'add_tag', tag:'vip_exception'},
-    {action_type:'add_tag', tag:'partial_resolution'},
-    {action_type:'add_tag', tag:'non_returnable'},
-    {action_type:'set_item_resolution', item_id:'item-1', resolution:'refund'},
-    {action_type:'set_item_resolution', item_id:'item-2', resolution:'refund'},
-    {action_type:'set_item_resolution', item_id:'item-3', resolution:'deny'},
-    {action_type:'set_ticket_resolution', resolution:'partial_refund'},
-    {action_type:'draft_reply', message:'We are sorry for the issues with your order. For the AirFry Pro we will process a refund under a VIP exception. For the Glass Storage Set we will process a refund because it arrived damaged. The Monogram Apron is personalized, so it is a partial resolution covering two items.'},
-    {action_type:'submit'},
-  ],
-};
+const perfectSolutions = {}; // Legacy — no longer used. Auto-play now fetches /api/hint dynamically.
 
 function updateFields() {
   const t = document.getElementById('actionType').value;
@@ -433,6 +492,7 @@ function updateFields() {
   document.getElementById('tagField').style.display = t==='add_tag' ? '' : 'none';
   document.getElementById('itemIdField').style.display = t==='set_item_resolution' ? '' : 'none';
   document.getElementById('resolutionField').style.display = (t==='set_item_resolution'||t==='set_ticket_resolution') ? '' : 'none';
+  document.getElementById('questionField').style.display = t==='ask_customer' ? '' : 'none';
   document.getElementById('messageField').style.display = t==='draft_reply' ? '' : 'none';
 }
 
@@ -447,6 +507,7 @@ function buildAction() {
   }
   if (t==='set_ticket_resolution') a.resolution = document.getElementById('resolutionVal').value;
   if (t==='draft_reply')  a.message = document.getElementById('messageVal').value;
+  if (t==='ask_customer') { const q = document.getElementById('questionVal').value; if (q) a.question = q; }
   return a;
 }
 
@@ -477,6 +538,28 @@ function updateStatePanel(obs) {
   document.getElementById('stateCard').style.display = '';
   document.getElementById('stPriority').textContent = obs.current_priority || '—';
   document.getElementById('stTicketRes').textContent = obs.ticket_resolution || '—';
+  // Sentiment display
+  const sent = obs.customer_sentiment;
+  document.getElementById('stSentiment').textContent = sent != null
+    ? (sent > 0.2 ? '😊 positive' : sent < -0.1 ? '😡 upset' : '😐 neutral') + ` (${sent.toFixed(2)})`
+    : '—';
+  // Fraud flag display
+  document.getElementById('stFraudSec').style.display = obs.fraud_flagged ? '' : 'none';
+
+  // Customer messages (multi-turn dialogue)
+  const msgs = obs.customer_messages || [];
+  const dialogueSec = document.getElementById('stDialogueSec');
+  const dialogueEl = document.getElementById('stDialogue');
+  if (msgs.length > 0) {
+    dialogueSec.style.display = '';
+    dialogueEl.innerHTML = msgs.map(m => `
+      <div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.25);
+        border-radius:8px;padding:8px 10px;font-size:11px;line-height:1.5">
+        <span style="color:var(--accent);font-weight:600;font-size:10px">CUSTOMER</span><br/>${m.text}
+      </div>`).join('');
+  } else {
+    dialogueSec.style.display = 'none';
+  }
 
   const tagsEl = document.getElementById('stTags');
   tagsEl.innerHTML = obs.current_tags && obs.current_tags.length
@@ -593,11 +676,22 @@ async function autoPlay() {
   document.getElementById('autoBtn').disabled = true;
   document.getElementById('stepBtn').disabled = true;
 
-  const steps = perfectSolutions[taskId] || perfectSolutions['easy_refund'];
-  for (const action of steps) {
-    const done = await sendAction(action);
-    await new Promise(r => setTimeout(r, 500));
-    if (done) break;
+  // Dynamically fetch the next optimal action from the server's deterministic policy.
+  // Works correctly for all 7 tasks regardless of which product names/prices were generated.
+  for (let i = 0; i < 25; i++) {
+    try {
+      const hintRes = await fetch(`${BASE}/api/hint`);
+      if (!hintRes.ok) break;
+      const hintData = await hintRes.json();
+      const action = hintData.next_action;
+      if (!action) break;
+      const done = await sendAction(action);
+      await new Promise(r => setTimeout(r, 600));
+      if (done) break;
+    } catch(e) {
+      addLog(`<div style="color:var(--red)">❌ Auto-play error: ${e.message}</div>`);
+      break;
+    }
   }
   autoPlaying = false;
 }
